@@ -1,0 +1,6 @@
+numpy
+gymnasium
+pettingzoo
+supersuit
+stable-baselines3[extra]
+tensorboard
