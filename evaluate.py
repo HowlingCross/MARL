@@ -4,10 +4,13 @@ from cacc_ncars_env import CACCNCarsEnv
 
 def main():
     print("Környezet és modell betöltése teszteléshez...")
-    env = CACCNCarsEnv(num_cars=3)
+    
+    # Ugyanaz a 3 autó és 36.11 m/s, mint a tanításnál
+    env = CACCNCarsEnv(num_cars=4, target_speed=36.11, safe_dist=15.0)
     model = PPO.load("ppo_cacc_model")
     
     obs, infos = env.reset()
+    
     total_rewards = {agent: 0.0 for agent in env.possible_agents}
     steps = 0
     crashed = False
@@ -21,10 +24,11 @@ def main():
             
         obs, rewards, terminations, truncations, infos = env.step(actions)
         
-        for agent in env.agents:
-            total_rewards[agent] += rewards[agent]
-            if rewards[agent] <= -50.0:
+        for agent, reward in rewards.items():
+            total_rewards[agent] += reward
+            if reward <= -50.0:
                 crashed = True
+                
         steps += 1
 
     print("\n--- TESZT EREDMÉNYEK ---")
