@@ -1,68 +1,121 @@
-import numpy as np
-import torch
-from torch.utils.tensorboard import SummaryWriter
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+import os
 import supersuit as ss
+from stable_baselines3 import PPO, SAC
+from stable_baselines3.common.callbacks import CallbackList, EvalCallback, CheckpointCallback
+from stable_baselines3.common.vec_env import VecMonitor
+
+# A saját CACC környezeted importálása
 from cacc_ncars_env import CACCNCarsEnv
 
-class DirectTensorboardRewardCallback(BaseCallback):
+
+def make_cacc_env():
     """
-    Közvetlenül a TensorBoard eseményfájlba írja az 1. autó (lead car)
-    és a teljes konvoj átlagos lépésenkénti jutalmát.
+    Létrehozza a többágenses környezetet és SuperSuit segítségével 
+    vektorizált, egyágenses felületűvé (Parameter Sharing) alakítja.
     """
-    def __init__(self, verbose=0):
-        super().__init__(verbose)
-        self.writer = None
+    env = CACCNCarsEnv()
+    # PettingZoo ParallelEnv -> VecEnv konverzió (Parameter Sharing)
+    env = ss.pettingzoo_env_to_vec_env_v1(env)
+    # Csomagolás a Stable-Baselines3 formátumhoz
+    env = ss.concat_vec_envs_v1(env, num_vec_envs=1, num_cpus=1, base_class="stable_baselines3")
+    # Metrikák (epizódjutalom, hossz) automatikus figyelése
+    env = VecMonitor(env)
+    return env
 
-    def _on_training_start(self) -> None:
-        self.writer = SummaryWriter(log_dir=self.logger.dir)
-
-    def _on_step(self) -> bool:
-        rewards = self.locals.get("rewards")
-        if rewards is not None and len(rewards) > 0 and self.writer is not None:
-            lead_car_rew = float(rewards[0])
-            mean_step_rew = float(np.mean(rewards))
-
-            self.writer.add_scalar("reward/lead_car_reward", lead_car_rew, self.num_timesteps)
-            self.writer.add_scalar("reward/mean_step_reward", mean_step_rew, self.num_timesteps)
-
-            if self.n_calls % 1000 == 0:
-                self.writer.flush()
-        return True
-
-    def _on_training_end(self) -> None:
-        if self.writer:
-            self.writer.flush()
-            self.writer.close()
 
 def main():
-    print("Környezet inicializálása tanításhoz...")
+    # 1. Mappák előkészítése
+    log_dir = "./logs/eval_results/"
+    tensorboard_dir = "./tensorboard/"
+    model_save_dir = "./models/"
     
-    # 130 km/h = 36.11 m/s
-    env = CACCNCarsEnv(num_cars=4, target_speed=36.11, safe_dist=72.0)
-    
-    env = ss.pettingzoo_env_to_vec_env_v1(env)
-    env = ss.concat_vec_envs_v1(env, num_vec_envs=1, num_cpus=1, base_class='stable_baselines3')
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    os.makedirs(model_save_dir, exist_ok=True)
 
+    print("[INFO] Környezetek inicializálása...")
+    # Tanítási környezet
+    train_env = make_cacc_env()
+    # Külön kiértékelő környezet a tiszta, determinisztikus tesztekhez
+    eval_env = make_cacc_env()
+
+    # 2. Callback-ek beállítása
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=os.path.join(model_save_dir, "best_model"),
+        log_path=log_dir,
+        eval_freq=5000,          
+        n_eval_episodes=5,       
+        deterministic=True,      
+        render=False,
+        verbose=1
+    )
+
+    checkpoint_callback = CheckpointCallback(
+        save_freq=20000,
+        save_path=model_save_dir,
+        name_prefix="cacc_model_step",
+        save_replay_buffer=False,
+        save_vecnormalize=True,
+    )
+
+    callbacks = CallbackList([eval_callback, checkpoint_callback])
+
+    # =========================================================================
+    # 3. VÁLASZD KI A MODELLT (Csak az egyik legyen kitakarás nélkül!)
+    # =========================================================================
+    
+    # --- A) PPO MODELL (Jelenleg ez az aktív) ---
+    print("[INFO] PPO modell felépítése...")
     model = PPO(
         policy="MlpPolicy",
-        env=env,
-        verbose=1,
+        env=train_env,
         learning_rate=3e-4,
-        tensorboard_log="./runs/ppo_cacc_training/"
+        n_steps=2048,
+        batch_size=1024,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.005,
+        verbose=1,
+        tensorboard_log=tensorboard_dir
     )
+    final_model_path = os.path.join(model_save_dir, "ppo_cacc_final")
 
-    print("Tanítás indítása (2,000,000 lépés)...")
+    # --- B) SAC MODELL (Jelenleg ki van kommentelve) ---
+    # print("[INFO] SAC modell felépítése...")
+    # model = SAC(
+    #     policy="MlpPolicy",
+    #     env=train_env,
+    #     learning_rate=3e-4,
+    #     buffer_size=50000,     
+    #     batch_size=256,
+    #     gamma=0.99,
+    #     tau=0.005,
+    #     verbose=1,
+    #     tensorboard_log=tensorboard_dir
+    # )
+    # final_model_path = os.path.join(model_save_dir, "sac_cacc_final")
+    # =========================================================================
+
+    # 4. Tanítás indítása
+    total_timesteps = 500000000
+    print(f"[INFO] Tanítás kezdete ({total_timesteps} időlépés)...")
     model.learn(
-        total_timesteps=2e6, 
-        tb_log_name="PPO_3cars", 
-        callback=DirectTensorboardRewardCallback()
+        total_timesteps=total_timesteps,
+        callback=callbacks,
+        progress_bar=True
     )
 
-    print("Modell mentése...")
-    model.save("ppo_cacc_model")
-    print("Tanítás befejezve! Eredmények kimentve a runs/ppo_cacc_training/ mappába.")
+    # 5. Végső modell mentése
+    model.save(final_model_path)
+    print(f"[INFO] Tanítás befejezve! Modell mentve ide: {final_model_path}")
+
+    # Környezetek lezárása
+    train_env.close()
+    eval_env.close()
+
 
 if __name__ == "__main__":
     main()
