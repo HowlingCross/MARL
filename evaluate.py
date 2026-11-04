@@ -6,7 +6,6 @@ from cacc_ncars_env import CACCNCarsEnv
 def main():
     print("Környezet és modell betöltése vizualizációval...")
 
-    # Itt kapcsoljuk be a grafikus ablakot: render_mode="human"
     env = CACCNCarsEnv(num_cars=2, target_speed=36.0, safe_dist=25.0, render_mode="human")
     #model = PPO.load("./models/best_model/best_model")
     model = SAC.load("./models/best_model/best_model")
@@ -43,7 +42,6 @@ def main():
         print(f"  {agent}: Jutalom = {total_rewards[agent]:.2f} | Távolság = {dist:.2f} m | Sebesség = {vel:.2f} m/s")
 
     env.close()
-
 
 if __name__ == "__main__":
     main()

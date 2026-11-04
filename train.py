@@ -3,8 +3,6 @@ import supersuit as ss
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CallbackList, EvalCallback, CheckpointCallback
 from stable_baselines3.common.vec_env import VecMonitor
-
-# A saját CACC környezeted importálása
 from cacc_ncars_env import CACCNCarsEnv
 
 
@@ -14,17 +12,13 @@ def make_cacc_env():
     vektorizált, egyágenses felületűvé (Parameter Sharing) alakítja.
     """
     env = CACCNCarsEnv()
-    # PettingZoo ParallelEnv -> VecEnv konverzió (Parameter Sharing)
     env = ss.pettingzoo_env_to_vec_env_v1(env)
-    # Csomagolás a Stable-Baselines3 formátumhoz
     env = ss.concat_vec_envs_v1(env, num_vec_envs=1, num_cpus=1, base_class="stable_baselines3")
-    # Metrikák (epizódjutalom, hossz) automatikus figyelése
     env = VecMonitor(env)
     return env
 
 
 def main():
-    # 1. Mappák előkészítése
     log_dir = "./logs/eval_results/"
     tensorboard_dir = "./tensorboard/"
     model_save_dir = "./models/"
@@ -34,12 +28,9 @@ def main():
     os.makedirs(model_save_dir, exist_ok=True)
 
     print("[INFO] Környezetek inicializálása...")
-    # Tanítási környezet
     train_env = make_cacc_env()
-    # Külön kiértékelő környezet a tiszta, determinisztikus tesztekhez
     eval_env = make_cacc_env()
 
-    # 2. Callback-ek beállítása
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=os.path.join(model_save_dir, "best_model"),
@@ -61,46 +52,38 @@ def main():
 
     callbacks = CallbackList([eval_callback, checkpoint_callback])
 
-    # =========================================================================
-    # 3. VÁLASZD KI A MODELLT (Csak az egyik legyen kitakarás nélkül!)
-    # =========================================================================
     
-    # --- A) PPO MODELL (Jelenleg ez az aktív) ---
-    print("[INFO] PPO modell felépítése...")
-    model = PPO(
-        policy="MlpPolicy",
-        env=train_env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=1024,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.005,
-        verbose=1,
-        tensorboard_log=tensorboard_dir
-    )
+    #print("[INFO] PPO modell felépítése...")
+    #model = PPO(
+    #    policy="MlpPolicy",
+    #    env=train_env,
+    #    learning_rate=3e-4,
+    #    n_steps=2048,
+    #    batch_size=1024,
+    #    n_epochs=10,
+    #    gamma=0.99,
+    #    gae_lambda=0.95,
+    #    clip_range=0.2,
+    #    ent_coef=0.005,
+    #    verbose=1,
+    #)
     final_model_path = os.path.join(model_save_dir, "ppo_cacc_final")
 
-    # --- B) SAC MODELL (Jelenleg ki van kommentelve) ---
-    # print("[INFO] SAC modell felépítése...")
-    # model = SAC(
-    #     policy="MlpPolicy",
-    #     env=train_env,
-    #     learning_rate=3e-4,
-    #     buffer_size=50000,     
-    #     batch_size=256,
-    #     gamma=0.99,
-    #     tau=0.005,
-    #     verbose=1,
-    #     tensorboard_log=tensorboard_dir
-    # )
-    # final_model_path = os.path.join(model_save_dir, "sac_cacc_final")
-    # =========================================================================
+    print("[INFO] SAC modell felépítése...")
+    model = SAC(
+         policy="MlpPolicy",
+         env=train_env,
+         learning_rate=3e-4,
+         buffer_size=50000,     
+         batch_size=256,
+         gamma=0.99,
+         tau=0.005,
+         verbose=1,
+         tensorboard_log=tensorboard_dir
+     )
+    final_model_path = os.path.join(model_save_dir, "sac_cacc_final")
 
-    # 4. Tanítás indítása
-    total_timesteps = 500000000
+    total_timesteps = 350000
     print(f"[INFO] Tanítás kezdete ({total_timesteps} időlépés)...")
     model.learn(
         total_timesteps=total_timesteps,
@@ -108,14 +91,11 @@ def main():
         progress_bar=True
     )
 
-    # 5. Végső modell mentése
     model.save(final_model_path)
     print(f"[INFO] Tanítás befejezve! Modell mentve ide: {final_model_path}")
 
-    # Környezetek lezárása
     train_env.close()
     eval_env.close()
-
 
 if __name__ == "__main__":
     main()
