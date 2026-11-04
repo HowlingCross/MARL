@@ -326,11 +326,12 @@ class CACCNCarsEnv(ParallelEnv):
 
         split_happened = False
 
-        # ---------------------------------------------------------------------
         # 3. VALÓDI 2D HITBOX ÜTKÖZÉSVIZSGÁLAT (X és Y egyidejű metszete)
         # ---------------------------------------------------------------------
-        HITBOX_X = self.crash_dist   # 4.2 méter hosszirányban
-        HITBOX_Y = 0.52              # 0.52 sávszélesség oldalirányban (ha külön sávban vannak, dy ~ 1.0 -> nem ütköznek!)
+        HITBOX_X = self.crash_dist   # 4.2 méter hosszirányban (ütközési küszöb)
+        HITBOX_Y = 1.0               # Oldalirányú küszöb (ha y méterben van, ez fedi le az autó szélességét)
+        
+        DANGER_X = getattr(self, 'danger_dist', 8.0) # Előzetes veszélyzóna hosszirányban (pl. 8m)
 
         for agent in self.agents:
             pos_i = self.state[agent]["pos"]
@@ -339,10 +340,11 @@ class CACCNCarsEnv(ParallelEnv):
             # Ellenőrzés a Lead ellen (Lead mindig a 0-s sávban halad, y = 0.0)
             dx_lead = abs(self.lead_pos - pos_i)
             dy_lead = abs(float(self.lead_lane) - y_i)
+            
             if dx_lead <= HITBOX_X and dy_lead <= HITBOX_Y:
                 self.crash_happened = True
                 self.crashed_agents.add(agent)
-            elif dx_lead <= self.danger_dist and dy_lead <= HITBOX_Y:
+            elif dx_lead <= DANGER_X and dy_lead <= HITBOX_Y:
                 self.danger_agents.add(agent)
 
             # Ellenőrzés a többi tanuló jármű ellen
@@ -356,9 +358,8 @@ class CACCNCarsEnv(ParallelEnv):
                     self.crash_happened = True
                     self.crashed_agents.add(agent)
                     self.crashed_agents.add(other)
-                elif dx <= self.danger_dist and dy <= HITBOX_Y:
+                elif dx <= DANGER_X and dy <= HITBOX_Y:
                     self.danger_agents.add(agent)
-
         # ---------------------------------------------------------------------
         # 4. JUTALOMFÜGGVÉNYEK SZÁMÍTÁSA
         # ---------------------------------------------------------------------
@@ -405,7 +406,6 @@ class CACCNCarsEnv(ParallelEnv):
                 - jerk_penalty
                 - proximity_penalty
                 - ramp_urgency_pen
-                + merge_bonuses[agent]
             )
 
         # ---------------------------------------------------------------------

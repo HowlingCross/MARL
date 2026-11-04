@@ -21,7 +21,7 @@ def make_cacc_env():
 def main():
     log_dir = "./logs/eval_results/"
     tensorboard_dir = "./tensorboard/"
-    model_save_dir = "./models/"
+    model_save_dir = "./models/ppo"
     
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
@@ -53,37 +53,24 @@ def main():
     callbacks = CallbackList([eval_callback, checkpoint_callback])
 
     
-    #print("[INFO] PPO modell felépítése...")
-    #model = PPO(
-    #    policy="MlpPolicy",
-    #    env=train_env,
-    #    learning_rate=3e-4,
-    #    n_steps=2048,
-    #    batch_size=1024,
-    #    n_epochs=10,
-    #    gamma=0.99,
-    #    gae_lambda=0.95,
-    #    clip_range=0.2,
-    #    ent_coef=0.005,
-    #    verbose=1,
-    #)
+    print("[INFO] PPO modell felépítése...")
+    model = PPO(
+        policy="MlpPolicy",
+        env=train_env,
+        learning_rate=3e-4,
+        n_steps=4096,
+        batch_size=128,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.05,
+        verbose=1,
+        tensorboard_log=tensorboard_dir
+    )
     final_model_path = os.path.join(model_save_dir, "ppo_cacc_final")
 
-    print("[INFO] SAC modell felépítése...")
-    model = SAC(
-         policy="MlpPolicy",
-         env=train_env,
-         learning_rate=3e-4,
-         buffer_size=50000,     
-         batch_size=256,
-         gamma=0.99,
-         tau=0.005,
-         verbose=1,
-         tensorboard_log=tensorboard_dir
-     )
-    final_model_path = os.path.join(model_save_dir, "sac_cacc_final")
-
-    total_timesteps = 350000
+    total_timesteps = 6000000
     print(f"[INFO] Tanítás kezdete ({total_timesteps} időlépés)...")
     model.learn(
         total_timesteps=total_timesteps,
