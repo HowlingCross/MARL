@@ -27,12 +27,13 @@ class CACCNCarsEnv(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "cacc_merging_v0", "render_fps": 30}
 
     def __init__(self,
-                 num_cars=4,
-                 target_speed=36.11,       # ~130 km/h
+                 num_cars=8,
+                 target_speed=36.11,
+                 greediness=0.0,    
                  safe_dist=22.0,
                  danger_dist=7.0,
                  crash_dist=4.2,
-                 max_dist=260.0,           # Megemelve, hogy a 4+1 autós konvoj ne szakadjon szét tévesen
+                 max_dist=260.0,          
                  track_length=1500.0,
                  merge_zone_start=220.0,   # Itt kezdődik a szaggatott vonal (besorolási zóna)
                  ramp_end=750.0,           # Itt ér véget fizikailag a felhajtósáv (1-es sáv)
@@ -49,6 +50,7 @@ class CACCNCarsEnv(ParallelEnv):
         self.render_mode = render_mode
 
         self.num_cars = num_cars
+        self.greediness = float(greediness)
         self.possible_agents = [f"car_{i}" for i in range(self.num_cars)]
         self.agents = self.possible_agents[:]
         self.merging_agent = f"car_{self.num_cars - 1}"  # Az utolsó ágens (car_3) érkezik a felhajtón
@@ -361,21 +363,25 @@ class CACCNCarsEnv(ParallelEnv):
                 elif dx <= DANGER_X and dy <= HITBOX_Y:
                     self.danger_agents.add(agent)
         # ---------------------------------------------------------------------
-        # 4. JUTALOMFÜGGVÉNYEK SZÁMÍTÁSA
+        # 4. JUTALOMFÜGGVÉNYEK SZÁMÍTÁSA ÉS EGOIZMUS (GREEDINESS) KEZELÉSE
         # ---------------------------------------------------------------------
         for agent in self.agents:
             pos = self.state[agent]["pos"]
             lane = self.state[agent]["lane"]
 
-            # Valós elöl haladó a fizikai sávban
+            # Valós elöl haladó a fizikai sávban (ütközésvizsgálathoz és veszélyhez)
             phys_front_pos, phys_front_vel, _ = self._get_leader_in_lane(
                 pos, lane, exclude_agent=agent, include_virtual=False
             )
             phys_dist = phys_front_pos - pos
 
-            # Szabályozási referencia (a virtuális vetület figyelembevételével a résnyitáshoz)
+            # JÁTÉKELMÉLETI EGOIZMUS (GREEDINESS) LOGIKA:
+            # Ha greediness < 0.5 (kooperatív), figyelembe veszi a virtuális vetületet (résnyitás).
+            # Ha greediness >= 0.5 (egoista/greedy), letagadja, csak a fizikai sávot követi ridegen.
+            use_virtual_for_ref = (self.greediness < 0.5)
+
             ref_front_pos, ref_front_vel, _ = self._get_leader_in_lane(
-                pos, lane, exclude_agent=agent, include_virtual=True
+                pos, lane, exclude_agent=agent, include_virtual=use_virtual_for_ref
             )
             ref_dist = ref_front_pos - pos
             rel_vel = ref_front_vel - self.state[agent]["vel"]
@@ -388,10 +394,13 @@ class CACCNCarsEnv(ParallelEnv):
             vel_penalty = abs(rel_vel) * self.weight_rel_vel
             jerk_penalty = jerks[agent] * self.weight_jerk
 
+            # Felhajtási sürgősségi büntetés: 
+            # Ha a főpályások egoisták (magas greediness), a besoroló autó még nagyobb büntetést kap a torlódásért.
             ramp_urgency_pen = 0.0
             if self.state[agent]["y"] > 0.35 and pos > self.merge_zone_start:
                 progress_on_ramp = (pos - self.merge_zone_start) / (self.ramp_end - self.merge_zone_start)
-                ramp_urgency_pen = float(np.clip(progress_on_ramp, 0.0, 1.0)) * 0.8
+                urgency_multiplier = 0.8 + (self.greediness * 1.2)
+                ramp_urgency_pen = float(np.clip(progress_on_ramp, 0.0, 1.0)) * urgency_multiplier
 
             proximity_penalty = 0.0
             if agent in self.danger_agents:
@@ -399,6 +408,7 @@ class CACCNCarsEnv(ParallelEnv):
             elif phys_dist <= 13.0 and self.state[agent]["y"] < 0.35:
                 proximity_penalty = (13.0 - phys_dist) * 2.5
 
+            # Végső hibrid jutalomfüggvény
             rewards[agent] = (
                 progress_rew
                 - dist_penalty

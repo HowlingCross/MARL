@@ -59,7 +59,7 @@ def main():
         env=train_env,
         learning_rate=3e-4,
         n_steps=4096,
-        batch_size=128,
+        batch_size=1048,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
@@ -70,7 +70,7 @@ def main():
     )
     final_model_path = os.path.join(model_save_dir, "ppo_cacc_final")
 
-    total_timesteps = 6000000
+    total_timesteps = 800000
     print(f"[INFO] Tanítás kezdete ({total_timesteps} időlépés)...")
     model.learn(
         total_timesteps=total_timesteps,

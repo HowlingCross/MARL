@@ -6,7 +6,7 @@ from cacc_ncars_env import CACCNCarsEnv
 def main():
     print("Környezet és modell betöltése vizualizációval...")
 
-    env = CACCNCarsEnv(num_cars=3, target_speed=36.0, safe_dist=25.0, render_mode="human")
+    env = CACCNCarsEnv(num_cars=2, target_speed=36.0, safe_dist=25.0, render_mode="human")
     model = PPO.load("./models/ppo/best_model/best_model")
     obs, infos = env.reset()
 

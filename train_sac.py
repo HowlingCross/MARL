@@ -66,7 +66,7 @@ def main():
      )
     final_model_path = os.path.join(model_save_dir, "sac_cacc_final")
 
-    total_timesteps = 1200000
+    total_timesteps = 150000
     print(f"[INFO] Tanítás kezdete ({total_timesteps} időlépés)...")
     model.learn(
         total_timesteps=total_timesteps,
