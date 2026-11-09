@@ -58,7 +58,7 @@ def main():
          env=train_env,
          learning_rate=3e-4,
          buffer_size=50000,     
-         batch_size=256,
+         batch_size=1048,
          gamma=0.99,
          tau=0.005,
          verbose=1,

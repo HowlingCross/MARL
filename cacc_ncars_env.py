@@ -27,7 +27,7 @@ class CACCNCarsEnv(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "cacc_merging_v0", "render_fps": 30}
 
     def __init__(self,
-                 num_cars=8,
+                 num_cars=4,
                  target_speed=36.11,
                  greediness=0.0,    
                  safe_dist=22.0,
