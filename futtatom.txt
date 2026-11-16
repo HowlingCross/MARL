@@ -1,0 +1,20 @@
+cd Thesis/Marl
+source .venv/bin/activate
+python train.py
+
+
+cd Thesis/Marl
+source .venv/bin/activate
+python train_td3.py
+
+cd Thesis/Marl
+source .venv/bin/activate
+python train_sac.py
+
+cd Thesis/Marl
+source .venv/bin/activate
+tensorboard --logdir ./tensorboard/
+
+cd Thesis/Marl
+source .venv/bin/activate
+python evaluate.py

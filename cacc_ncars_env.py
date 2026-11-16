@@ -22,27 +22,28 @@ def _mirror_poly(top_pts, cy):
     bot_pts = [(x, int(round(2 * cy - y))) for (x, y) in reversed(top_pts)]
     return top_pts + bot_pts
 
-
 class CACCNCarsEnv(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "cacc_merging_v0", "render_fps": 30}
 
     def __init__(self,
-                 num_cars=4,
+                 num_cars=5,
+                 lead_prob=0.70,
                  target_speed=36.11,
-                 greediness=0.0,    
+                 greediness=0.1,
                  safe_dist=22.0,
                  danger_dist=7.0,
                  crash_dist=4.2,
-                 max_dist=260.0,          
+                 max_dist=260.0,
                  track_length=1500.0,
-                 merge_zone_start=220.0,   # Itt kezdődik a szaggatott vonal (besorolási zóna)
-                 ramp_end=750.0,           # Itt ér véget fizikailag a felhajtósáv (1-es sáv)
+                 merge_zone_start=220.0,
+                 ramp_end=800.0,
                  weight_progress=0.45,
-                 weight_dist=0.06,
-                 weight_rel_vel=0.04,
-                 weight_jerk=0.02,
+                 weight_dist=0.01,
+                 weight_rel_vel=0.02,
+                 weight_jerk=0.01,
+                 survival_bonus=1.0,
                  penalty_crash=-500.0,
-                 bonus_merge=120.0,        # Bónusz a sikeres, kooperatív besorolásért
+                 bonus_merge=0.0,
                  bonus_finish=150.0,
                  max_steps=600,
                  render_mode=None):
@@ -50,14 +51,15 @@ class CACCNCarsEnv(ParallelEnv):
         self.render_mode = render_mode
 
         self.num_cars = num_cars
+        self.lead_prob = float(lead_prob)
         self.greediness = float(greediness)
+
         self.possible_agents = [f"car_{i}" for i in range(self.num_cars)]
         self.agents = self.possible_agents[:]
-        self.merging_agent = f"car_{self.num_cars - 1}"  # Az utolsó ágens (car_3) érkezik a felhajtón
 
         self.dt = 0.1
-        self.max_speed = 41.67         # Max 150 km/h
-        self.min_speed = 18.00         # Min ~65 km/h (hogy a felhajtón tudjon alkalmazkodni)
+        self.max_speed = 36.11
+        self.min_speed = 16.66
         self.max_steps = max_steps
         self.track_length = track_length
         self.merge_zone_start = merge_zone_start
@@ -69,10 +71,12 @@ class CACCNCarsEnv(ParallelEnv):
         self.crash_dist = crash_dist
         self.max_dist = max_dist
 
+        self.sprite_cache = {}
         self.weight_progress = weight_progress
         self.weight_dist = weight_dist
         self.weight_rel_vel = weight_rel_vel
         self.weight_jerk = weight_jerk
+        self.survival_bonus = survival_bonus
         self.penalty_crash = penalty_crash
         self.bonus_merge = bonus_merge
         self.bonus_finish = bonus_finish
@@ -81,9 +85,9 @@ class CACCNCarsEnv(ParallelEnv):
         self.clock = None
         self.font = None
         self.small_font = None
-        self.sprite_cache = {}
         self.camera_x = 0.0
         self.camera_scale = 5.5
+        self.has_lead = True
         self.crash_happened = False
         self.ramp_overrun = False
         self.merge_completed = False
@@ -93,8 +97,6 @@ class CACCNCarsEnv(ParallelEnv):
         self.action_spaces = {}
         self.observation_spaces = {}
 
-        # 7 elemű megfigyelési tér minden ágensnek (Parameter Sharing kompatibilis):
-        # [vel, dist_error, rel_vel, y_lane, main_front_gap, main_rear_gap, rem_ramp_dist]
         obs_low = np.array([
             0.0, -self.safe_dist, -self.max_speed, 0.0,
             -self.max_dist, -self.max_dist, 0.0
@@ -130,21 +132,35 @@ class CACCNCarsEnv(ParallelEnv):
         self.danger_agents = set()
         self.state = {}
 
-        # Vezérjármű (Lead) mindig a főpályán (0-s sáv) halad
-        self.lead_pos = 210.0
-        self.lead_vel = float(np.random.uniform(31.0, 35.5))
-        self.lead_acc = 0.0
+        
+        # 1. Vezérjármű (Lead) véletlenszerű jelenléte és inicializálása
+        self.has_lead = bool(np.random.rand() < self.lead_prob)
         self.lead_lane = 0
+        self.lead_acc = 0.0
+        if self.has_lead:
+         self.lead_pos = float(np.random.uniform(225.0, 260.0))
+         self.lead_vel = float(np.random.uniform(31.0, 36.0))
+        else:
+         self.lead_pos = 99999.0
+         self.lead_vel = self.target_speed
+        # 2. Legalább 1, legfeljebb az összes (num_cars) autó indul a felhajtóról
+        num_merging = int(np.random.randint(1, self.num_cars + 1))
+        merging_set = set(np.random.choice(self.possible_agents, size=num_merging, replace=False))
 
-        # Főpályás konvoj (car_0, car_1, car_2) felépítése a 0-s sávban
-        last_main_pos = self.lead_pos
+        mainline_agents = [a for a in self.possible_agents if a not in merging_set]
+        ramp_agents = [a for a in self.possible_agents if a in merging_set]
+
+        # 3. Főpályás autók elhelyezése (0-s sáv)
+        last_main_pos = self.lead_pos if self.has_lead else 210.0
         last_main_vel = self.lead_vel
 
-        mainline_agents = [a for a in self.possible_agents if a != self.merging_agent]
-        for agent in mainline_agents:
-            gap = float(np.random.uniform(22.0, 30.0))
-            pos = last_main_pos - gap
-            vel = float(np.clip(last_main_vel + np.random.uniform(-2.0, 2.0), 26.0, 37.0))
+        for idx, agent in enumerate(mainline_agents):
+            if idx == 0 and not self.has_lead:
+                pos = last_main_pos
+            else:
+                gap = float(np.random.uniform(22.0, 35.0))
+                pos = last_main_pos - gap
+            vel = float(np.clip(last_main_vel + np.random.uniform(-2.0, 2.0), 26.0, 37.5))
             last_main_pos = pos
             last_main_vel = vel
 
@@ -158,25 +174,27 @@ class CACCNCarsEnv(ParallelEnv):
                 "merged": True
             }
 
-        # Besoroló jármű (car_3) elhelyezése a felhajtósávon (1-es sáv)
-        # Pontosan a car_0 (P1) és car_1 (F1) közötti longitudinális tartomány mellé indul,
-        # hogy kooperatív résnyitásra és besorolásra legyen szükség!
-        p1_pos = self.state["car_0"]["pos"]
-        f1_pos = self.state["car_1"]["pos"] if len(mainline_agents) > 1 else p1_pos - 25.0
-        merge_init_pos = float(np.random.uniform(f1_pos + 2.0, p1_pos - 4.0))
-        merge_init_vel = float(np.clip(self.lead_vel + np.random.uniform(-3.0, 1.5), 25.0, 36.0))
+        # 4. Felhajtósávos autók elhelyezése (1-es sáv)
+        last_ramp_pos = float(np.random.uniform(170.0, 205.0))
+        last_ramp_vel = float(np.random.uniform(26.0, 35.0))
 
-        self.state[self.merging_agent] = {
-            "pos": merge_init_pos,
-            "vel": merge_init_vel,
-            "acc": 0.0,
-            "lane": 1,
-            "y": 1.0,
-            "vy": 0.0,
-            "merged": False
-        }
+        for agent in ramp_agents:
+            pos = last_ramp_pos
+            vel = float(np.clip(last_ramp_vel + np.random.uniform(-2.0, 2.0), 25.0, 36.0))
+            last_ramp_pos = pos - float(np.random.uniform(24.0, 36.0))
+            last_ramp_vel = vel
 
-        all_x = [self.lead_pos] + [self.state[a]["pos"] for a in self.possible_agents]
+            self.state[agent] = {
+                "pos": pos,
+                "vel": vel,
+                "acc": 0.0,
+                "lane": 1,
+                "y": 1.0,
+                "vy": 0.0,
+                "merged": False
+            }
+
+        all_x = ([self.lead_pos] if self.has_lead else []) + [self.state[a]["pos"] for a in self.possible_agents]
         self.camera_x = float(np.min(all_x)) - 25.0
 
         if self.render_mode == "human":
@@ -185,14 +203,14 @@ class CACCNCarsEnv(ParallelEnv):
         return self._get_observations(), {agent: {} for agent in self.agents}
 
     def _get_leader_in_lane(self, agent_pos, target_lane, exclude_agent=None, include_virtual=True):
-        """
-        Megkeresi az adott sávban közvetlenül előttünk haladó járművet.
-        Ha include_virtual=True, akkor a főpályán (0-s sáv) haladó követő autó (F1)
-        érzékeli a felhajtón előtte lévő besoroló autó vetületét (Virtuális jármű V_m).
-        """
-        best_pos = self.lead_pos if self.lead_lane == target_lane else 99999.0
-        best_vel = self.lead_vel if self.lead_lane == target_lane else self.target_speed
-        best_name = "Lead" if self.lead_lane == target_lane else "Virtual_Lead"
+        if self.has_lead and self.lead_lane == target_lane:
+            best_pos = self.lead_pos
+            best_vel = self.lead_vel
+            best_name = "Lead"
+        else:
+            best_pos = 99999.0
+            best_vel = self.target_speed
+            best_name = "Virtual_Lead"
 
         for other in self.possible_agents:
             if other == exclude_agent:
@@ -203,13 +221,10 @@ class CACCNCarsEnv(ParallelEnv):
 
             same_lane = (other_lane == target_lane) or (abs(other_y - target_lane) < 0.55)
 
-            # Virtuális jármű (V_m) leképezés a főpályára, ha a besoroló autó a vezérlési zónában jár
             virtual_projection = (
                 include_virtual
                 and target_lane == 0
-                and other == self.merging_agent
                 and other_lane == 1
-                and other_pos >= (self.merge_zone_start - 70.0)
             )
 
             if (same_lane or virtual_projection) and other_pos > agent_pos:
@@ -219,16 +234,20 @@ class CACCNCarsEnv(ParallelEnv):
                     best_name = other
 
         if best_pos == 99999.0:
-            best_pos = max(self.lead_pos, agent_pos + self.safe_dist)
-            best_vel = self.lead_vel
-            best_name = "Lead"
+            best_pos = agent_pos + self.safe_dist
+            best_vel = self.target_speed
+            best_name = "Free_Flow"
 
         return best_pos, best_vel, best_name
 
     def _get_mainline_gaps(self, pos, exclude_agent=None):
-        """Visszaadja a főpályán (0-s sáv) előttünk és mögöttünk lévő legközelebbi autó távolságát és sebességét."""
-        front_dist = self.lead_pos - pos if self.lead_pos >= pos else self.max_dist
-        front_vel = self.lead_vel
+        if self.has_lead and self.lead_pos >= pos:
+            front_dist = self.lead_pos - pos
+            front_vel = self.lead_vel
+        else:
+            front_dist = self.max_dist
+            front_vel = self.target_speed
+
         rear_dist = self.max_dist
         rear_vel = self.target_speed
 
@@ -255,28 +274,28 @@ class CACCNCarsEnv(ParallelEnv):
         self.current_step += 1
         self.danger_agents = set()
 
-        # ---------------------------------------------------------------------
-        # 1. VEZÉRJÁRMŰ (LEAD) MOZGÁSA
-        # ---------------------------------------------------------------------
-        if 550.0 <= self.traveled_dist <= 850.0:
-            target_lead_v = 29.5
-        elif 1050.0 <= self.traveled_dist <= 1350.0:
-            target_lead_v = 39.0
-        else:
-            target_lead_v = self.target_speed + 2.5 * np.sin(self.current_step * 0.03)
-
-        self.lead_acc = float(np.clip((target_lead_v - self.lead_vel) * 1.2, -4.0, 2.5))
-        self.lead_vel = float(np.clip(self.lead_vel + self.lead_acc * self.dt, self.min_speed, self.max_speed))
-        self.lead_pos += self.lead_vel * self.dt
-        self.traveled_dist += self.lead_vel * self.dt
-
         step_dists = {}
         jerks = {}
-        merge_bonuses = {agent: 0.0 for agent in self.agents}
+        merge_bonuses = {}
+        # 1. VEZÉRJÁRMŰ (LEAD) MOZGÁSA
+        if self.has_lead:
+         front_agent_pos = max(self.state[a]["pos"] for a in self.possible_agents)
+         lead_gap = self.lead_pos - front_agent_pos
 
-        # ---------------------------------------------------------------------
+         if not self.merge_completed or lead_gap > 40.0:
+             target_lead_v = 31.0 + 1.5 * np.sin(self.current_step * 0.03)
+         elif 550.0 <= self.traveled_dist <= 850.0:
+             target_lead_v = 29.5
+         elif 1050.0 <= self.traveled_dist <= 1350.0:
+             target_lead_v = 38.5
+         else:
+             target_lead_v = self.target_speed + 2.0 * np.sin(self.current_step * 0.03)
+
+         self.lead_acc = float(np.clip((target_lead_v - self.lead_vel) * 1.2, -4.0, 2.5))
+         self.lead_vel = float(np.clip(self.lead_vel + self.lead_acc * self.dt, self.min_speed, self.max_speed))
+         self.lead_pos += self.lead_vel * self.dt
+
         # 2. ÁGENSEK KINEMATIKÁJA ÉS SÁVVÁLTÁSA
-        # ---------------------------------------------------------------------
         for agent in self.agents:
             act = actions[agent]
             prev_acc = self.state[agent]["acc"]
@@ -288,27 +307,28 @@ class CACCNCarsEnv(ParallelEnv):
 
             pos = self.state[agent]["pos"]
 
-            # Besorolási döntés: a felhajtón (1-es sáv) lévő autó átléphet a 0-s sávba
-            if self.state[agent]["lane"] == 1 and pos >= self.merge_zone_start:
+            if self.state[agent]["lane"] == 1:
                 front_gap, _, rear_gap, _ = self._get_mainline_gaps(pos, exclude_agent=agent)
-                if lane_cmd < 0.0:
-                    self.state[agent]["lane"] = 0
-                    if front_gap > 7.0 and rear_gap > 7.0:
-                        self.state[agent]["merged"] = True
-                        self.merge_completed = True
-                        safety_factor = min(front_gap, rear_gap) / self.safe_dist
-                        merge_bonuses[agent] = self.bonus_merge * float(np.clip(safety_factor, 0.5, 1.3))
-                        for coop_a in self.agents:
-                            if coop_a != agent and self.state[coop_a]["pos"] < pos:
-                                merge_bonuses[coop_a] += 35.0
+                
+                # Csak akkor engedjük át, ha már haladt a felhajtón legalább 250 métert,
+                # és a sebessége is közel van a főpályához (pl. min 22 m/s ~ 80 km/h)!
+                can_merge = (pos >= 250.0) and (self.state[agent]["vel"] >= 22.0)
 
-            # Oldalirányú (y) mozgás folyamatos átmenettel
+                if lane_cmd < 0.0 and can_merge:
+                    self.state[agent]["lane"] = 0
+                    self.state[agent]["merged"] = True
+                    if front_gap > 8.0 and rear_gap > 8.0:
+                        safety_factor = min(front_gap, rear_gap) / self.safe_dist
+                        merge_bonuses[agent] = self.bonus_merge * float(np.clip(safety_factor, 0.5, 1.2))
+                elif lane_cmd < 0.0 and not can_merge:
+                    # Ha túl korán akar átjönni, kap egy apró büntetést, hogy ne rángassa a kormányt az elején
+                    merge_bonuses[agent] = -5.0
+                    
             target_y = float(self.state[agent]["lane"])
             dy = float(np.clip(target_y - self.state[agent]["y"], -0.10, 0.10))
             self.state[agent]["vy"] = dy
             self.state[agent]["y"] += dy
 
-            # Hosszirányú sebesség és pozíció frissítése
             self.state[agent]["vel"] = float(
                 np.clip(self.state[agent]["vel"] + acceleration * self.dt, self.min_speed, self.max_speed)
             )
@@ -316,10 +336,12 @@ class CACCNCarsEnv(ParallelEnv):
             self.state[agent]["pos"] += d_pos
             step_dists[agent] = d_pos
 
-            # Felhajtósáv vége ellenőrzése
             if self.state[agent]["y"] > 0.45 and self.state[agent]["pos"] >= self.ramp_end:
                 self.ramp_overrun = True
                 self.crashed_agents.add(agent)
+
+        self.merge_completed = all(self.state[a]["merged"] for a in self.possible_agents)
+        self.traveled_dist += float(np.mean(list(step_dists.values())))
 
         observations = self._get_observations()
         rewards = {agent: 0.0 for agent in self.agents}
@@ -328,28 +350,24 @@ class CACCNCarsEnv(ParallelEnv):
 
         split_happened = False
 
-        # 3. VALÓDI 2D HITBOX ÜTKÖZÉSVIZSGÁLAT (X és Y egyidejű metszete)
-        # ---------------------------------------------------------------------
-        HITBOX_X = self.crash_dist   # 4.2 méter hosszirányban (ütközési küszöb)
-        HITBOX_Y = 1.0               # Oldalirányú küszöb (ha y méterben van, ez fedi le az autó szélességét)
-        
-        DANGER_X = getattr(self, 'danger_dist', 8.0) # Előzetes veszélyzóna hosszirányban (pl. 8m)
+        # 3. 2D HITBOX ÜTKÖZÉSVIZSGÁLAT (HITBOX_Y = 0.55)
+        HITBOX_X = self.crash_dist
+        HITBOX_Y = 0.55
+        DANGER_X = self.danger_dist
 
         for agent in self.agents:
             pos_i = self.state[agent]["pos"]
             y_i = self.state[agent]["y"]
 
-            # Ellenőrzés a Lead ellen (Lead mindig a 0-s sávban halad, y = 0.0)
-            dx_lead = abs(self.lead_pos - pos_i)
-            dy_lead = abs(float(self.lead_lane) - y_i)
-            
-            if dx_lead <= HITBOX_X and dy_lead <= HITBOX_Y:
-                self.crash_happened = True
-                self.crashed_agents.add(agent)
-            elif dx_lead <= DANGER_X and dy_lead <= HITBOX_Y:
-                self.danger_agents.add(agent)
+            if self.has_lead:
+                dx_lead = abs(self.lead_pos - pos_i)
+                dy_lead = abs(float(self.lead_lane) - y_i)
+                if dx_lead <= HITBOX_X and dy_lead <= HITBOX_Y:
+                    self.crash_happened = True
+                    self.crashed_agents.add(agent)
+                elif dx_lead <= DANGER_X and dy_lead <= HITBOX_Y:
+                    self.danger_agents.add(agent)
 
-            # Ellenőrzés a többi tanuló jármű ellen
             for other in self.agents:
                 if other == agent:
                     continue
@@ -362,31 +380,25 @@ class CACCNCarsEnv(ParallelEnv):
                     self.crashed_agents.add(other)
                 elif dx <= DANGER_X and dy <= HITBOX_Y:
                     self.danger_agents.add(agent)
-        # ---------------------------------------------------------------------
-        # 4. JUTALOMFÜGGVÉNYEK SZÁMÍTÁSA ÉS EGOIZMUS (GREEDINESS) KEZELÉSE
-        # ---------------------------------------------------------------------
+
+        # 4. JUTALOMFÜGGVÉNYEK (POZITÍV TÚLÉLÉSI ALAPVONAL + KIEGYENSÚLYOZOTT BÜNTETÉSEK)
         for agent in self.agents:
             pos = self.state[agent]["pos"]
             lane = self.state[agent]["lane"]
 
-            # Valós elöl haladó a fizikai sávban (ütközésvizsgálathoz és veszélyhez)
-            phys_front_pos, phys_front_vel, _ = self._get_leader_in_lane(
+            phys_front_pos, _, _ = self._get_leader_in_lane(
                 pos, lane, exclude_agent=agent, include_virtual=False
             )
             phys_dist = phys_front_pos - pos
 
-            # JÁTÉKELMÉLETI EGOIZMUS (GREEDINESS) LOGIKA:
-            # Ha greediness < 0.5 (kooperatív), figyelembe veszi a virtuális vetületet (résnyitás).
-            # Ha greediness >= 0.5 (egoista/greedy), letagadja, csak a fizikai sávot követi ridegen.
             use_virtual_for_ref = (self.greediness < 0.5)
-
             ref_front_pos, ref_front_vel, _ = self._get_leader_in_lane(
                 pos, lane, exclude_agent=agent, include_virtual=use_virtual_for_ref
             )
             ref_dist = ref_front_pos - pos
             rel_vel = ref_front_vel - self.state[agent]["vel"]
 
-            if phys_dist >= self.max_dist or (self.lead_pos - pos) >= self.max_dist:
+            if phys_dist >= self.max_dist or (self.has_lead and (self.lead_pos - pos) >= self.max_dist):
                 split_happened = True
 
             progress_rew = step_dists[agent] * self.weight_progress
@@ -394,47 +406,40 @@ class CACCNCarsEnv(ParallelEnv):
             vel_penalty = abs(rel_vel) * self.weight_rel_vel
             jerk_penalty = jerks[agent] * self.weight_jerk
 
-            # Felhajtási sürgősségi büntetés: 
-            # Ha a főpályások egoisták (magas greediness), a besoroló autó még nagyobb büntetést kap a torlódásért.
             ramp_urgency_pen = 0.0
-            if self.state[agent]["y"] > 0.35 and pos > self.merge_zone_start:
-                progress_on_ramp = (pos - self.merge_zone_start) / (self.ramp_end - self.merge_zone_start)
-                urgency_multiplier = 0.8 + (self.greediness * 1.2)
-                ramp_urgency_pen = float(np.clip(progress_on_ramp, 0.0, 1.0)) * urgency_multiplier
+            if self.state[agent]["y"] > 0.35:
+             progress_on_ramp = pos / self.ramp_end
+             urgency_multiplier = 0.1 + (self.greediness * 0.6)
+             ramp_urgency_pen = float(np.clip(progress_on_ramp, 0.0, 1.0)) * urgency_multiplier
 
             proximity_penalty = 0.0
             if agent in self.danger_agents:
-                proximity_penalty = 40.0 + max(0.0, self.danger_dist - phys_dist) * 15.0
-            elif phys_dist <= 13.0 and self.state[agent]["y"] < 0.35:
-                proximity_penalty = (13.0 - phys_dist) * 2.5
+                proximity_penalty = max(0.0, self.danger_dist - phys_dist) * 1.5
 
-            # Végső hibrid jutalomfüggvény
             rewards[agent] = (
-                progress_rew
+                self.survival_bonus
+                + progress_rew
                 - dist_penalty
                 - vel_penalty
                 - jerk_penalty
                 - proximity_penalty
                 - ramp_urgency_pen
+                + merge_bonuses.get(agent, 0.0)
             )
 
-        # ---------------------------------------------------------------------
-        # 5. EPIZÓDVÉGI FELTÉTELEK (ÜTKÖZÉS / PÁLYAVÉG)
-        # ---------------------------------------------------------------------
+        # 5. EPIZÓDVÉGI FELTÉTELEK
         if self.crash_happened or self.ramp_overrun or split_happened:
-            remaining_ratio = (self.max_steps - self.current_step) / self.max_steps
-            heavy_crash_pen = self.penalty_crash - (remaining_ratio * 200.0)
             for agent in self.agents:
                 if agent in self.crashed_agents or split_happened or self.ramp_overrun:
-                    rewards[agent] = heavy_crash_pen
+                    rewards[agent] = self.penalty_crash
                 else:
-                    rewards[agent] = heavy_crash_pen * 0.4
+                    rewards[agent] = self.penalty_crash * 0.4
                 terminations[agent] = True
 
             if self.render_mode == "human":
                 self.render()
                 import pygame
-                pygame.time.wait(1500)
+                pygame.time.wait(800)
 
             self.agents = []
             return observations, rewards, terminations, truncations, {a: {} for a in self.possible_agents}
@@ -450,7 +455,7 @@ class CACCNCarsEnv(ParallelEnv):
             self.render()
 
         return observations, rewards, terminations, truncations, {a: {} for a in self.possible_agents}
-    
+
     def _get_observations(self):
         obs = {}
         for agent in self.possible_agents:
@@ -458,17 +463,14 @@ class CACCNCarsEnv(ParallelEnv):
             vel = self.state[agent]["vel"]
             lane = self.state[agent]["lane"]
 
-            # Követési hiba és relatív sebesség (Virtuális jármű V_m figyelembevételével)
             front_pos, front_vel, _ = self._get_leader_in_lane(
                 pos, lane, exclude_agent=agent, include_virtual=True
             )
             dist_error = float(np.clip((front_pos - pos) - self.safe_dist, -self.safe_dist, self.max_dist))
             rel_vel = float(np.clip(front_vel - vel, -self.max_speed, self.max_speed))
 
-            # Főpályás (0-s sáv) első és hátsó rések
             main_front_gap, _, main_rear_gap, _ = self._get_mainline_gaps(pos, exclude_agent=agent)
 
-            # Hátralévő távolság a felhajtósáv végéig (ha már a főpályán van, akkor ramp_end)
             if lane == 1:
                 rem_ramp = float(np.clip(self.ramp_end - pos, 0.0, self.ramp_end))
             else:
@@ -484,6 +486,19 @@ class CACCNCarsEnv(ParallelEnv):
                 rem_ramp
             ], dtype=np.float32)
         return obs
+
+    def close(self):
+        if self.screen is not None:
+            import pygame
+            pygame.display.quit()
+            pygame.quit()
+            self.screen = None
+
+    def observation_space(self, agent):
+        return self.observation_spaces[agent]
+
+    def action_space(self, agent):
+        return self.action_spaces[agent]
 
     # =========================================================================
     # 8X SUPERSAMPLED (440x220) HD BÉZIER-VEKTOROS AUTÓMODELL-GENERÁTOR
@@ -862,7 +877,7 @@ class CACCNCarsEnv(ParallelEnv):
                 self.close()
                 return
 
-        all_positions = [self.lead_pos] + [self.state[a]["pos"] for a in self.possible_agents]
+        all_positions = ([self.lead_pos] if self.has_lead else []) + [self.state[a]["pos"] for a in self.possible_agents]
         min_pos = min(all_positions)
         max_pos = max(all_positions)
         spread = max(75.0, (max_pos - min_pos) + 42.0)
@@ -883,7 +898,7 @@ class CACCNCarsEnv(ParallelEnv):
         pygame.draw.rect(self.screen, (46, 50, 58), (0, road_y, width, lane_height))
         pygame.draw.line(self.screen, (235, 235, 235), (0, road_y), (width, road_y), 3)
 
-        # 1-es sáv (Besoroló sáv - ramp_end-nél véget ér!)
+        # 1-es sáv (Besoroló sáv)
         ramp_end_sx = int((self.ramp_end - camera_left_world) * scale)
         taper_len = int(28.0 * scale)
         ramp_start_taper_sx = ramp_end_sx - taper_len
@@ -894,7 +909,6 @@ class CACCNCarsEnv(ParallelEnv):
                 pygame.draw.rect(self.screen, (52, 56, 66), (0, road_y + lane_height, flat_end, lane_height))
                 pygame.draw.line(self.screen, (235, 235, 235), (0, road_y + lane_height * 2), (flat_end, road_y + lane_height * 2), 3)
 
-            # Beszűkülő terelőszakasz a besorolósáv végén
             taper_poly = [
                 (ramp_start_taper_sx, road_y + lane_height),
                 (ramp_end_sx, road_y + lane_height),
@@ -906,7 +920,7 @@ class CACCNCarsEnv(ParallelEnv):
                 (ramp_start_taper_sx, road_y + lane_height * 2),
                 (ramp_end_sx, road_y + lane_height), 4
             )
-            lbl_end = self.small_font.render("BESOROLÓ SÁV VÉGE (750m)", True, (255, 110, 110))
+            lbl_end = self.small_font.render("BESOROLÓ SÁV VÉGE (800m)", True, (255, 110, 110))
             self.screen.blit(lbl_end, (ramp_start_taper_sx - 20, road_y + lane_height * 2 + 8))
 
         if ramp_end_sx < width:
@@ -914,15 +928,6 @@ class CACCNCarsEnv(ParallelEnv):
                 self.screen, (235, 235, 235),
                 (max(0, ramp_end_sx), road_y + lane_height),
                 (width, road_y + lane_height), 3
-            )
-
-        # Sávelválasztó vonal (merge_zone_start-ig folytonos záróvonal, utána szaggatott)
-        merge_start_sx = int((self.merge_zone_start - camera_left_world) * scale)
-        if merge_start_sx > 0:
-            pygame.draw.line(
-                self.screen, (240, 240, 240),
-                (0, road_y + lane_height),
-                (min(width, merge_start_sx), road_y + lane_height), 3
             )
 
         visible_world_width = int(width / scale) + 40
@@ -937,7 +942,6 @@ class CACCNCarsEnv(ParallelEnv):
                     (sx + dash_len, road_y + lane_height), 2
                 )
 
-        # Kilométer-/méterkövek
         first_post = int(camera_left_world // 50) * 50
         for world_x in range(first_post, first_post + visible_world_width, 50):
             sx = int((world_x - camera_left_world) * scale)
@@ -946,22 +950,25 @@ class CACCNCarsEnv(ParallelEnv):
             post_lbl = self.small_font.render(f"{world_x}m", True, (255, 255, 255))
             self.screen.blit(post_lbl, (sx - 18, road_y - 32))
 
-        # Virtuális jármű (V_m) vetület megjelenítése a főpályán, amíg a car_3 a felhajtón van
-        m_state = self.state[self.merging_agent]
-        if m_state["lane"] == 1:
-            vm_sx = int((m_state["pos"] - camera_left_world) * scale)
-            vm_cy = road_y + int(0.5 * lane_height)
-            ramp_cy = road_y + int((m_state["y"] + 0.5) * lane_height)
-            pygame.draw.rect(self.screen, (46, 204, 113), (vm_sx - 36, vm_cy - 16, 72, 32), 2, border_radius=5)
-            pygame.draw.line(self.screen, (46, 204, 113), (vm_sx, ramp_cy - 18), (vm_sx, vm_cy + 16), 2)
-            vm_lbl = self.small_font.render("V_m vetület", True, (46, 204, 113))
-            self.screen.blit(vm_lbl, (vm_sx - 34, vm_cy - 30))
+        # Virtuális jármű (V_m) vetületek megjelenítése minden felhajtón lévő autóra
+        for agent in self.possible_agents:
+            m_state = self.state[agent]
+            if m_state["lane"] == 1:
+                vm_sx = int((m_state["pos"] - camera_left_world) * scale)
+                vm_cy = road_y + int(0.5 * lane_height)
+                ramp_cy = road_y + int((m_state["y"] + 0.5) * lane_height)
+                pygame.draw.rect(self.screen, (46, 204, 113), (vm_sx - 36, vm_cy - 16, 72, 32), 2, border_radius=5)
+                pygame.draw.line(self.screen, (46, 204, 113), (vm_sx, ramp_cy - 18), (vm_sx, vm_cy + 16), 2)
+                vm_lbl = self.small_font.render(f"V_m ({agent})", True, (46, 204, 113))
+                self.screen.blit(vm_lbl, (vm_sx - 34, vm_cy - 30))
 
         # Távolságvonalak kirajzolása
         for agent in self.possible_agents:
             pos = self.state[agent]["pos"]
             lane = self.state[agent]["lane"]
-            front_pos, _, _ = self._get_leader_in_lane(pos, lane, exclude_agent=agent, include_virtual=True)
+            front_pos, _, best_name = self._get_leader_in_lane(pos, lane, exclude_agent=agent, include_virtual=True)
+            if best_name == "Free_Flow":
+                continue
             dist = front_pos - pos
             x_back = int((pos - camera_left_world) * scale)
             x_front = int((front_pos - camera_left_world) * scale)
@@ -981,7 +988,9 @@ class CACCNCarsEnv(ParallelEnv):
             lbl = self.small_font.render(txt, True, line_color)
             self.screen.blit(lbl, ((x_back + x_front) // 2 - 18, line_y + 2))
 
-        vehicles = [("Lead", self.lead_pos, self.lead_vel, self.lead_acc, float(self.lead_lane), 0.0)]
+        vehicles = []
+        if self.has_lead:
+            vehicles.append(("Lead", self.lead_pos, self.lead_vel, self.lead_acc, float(self.lead_lane), 0.0, False))
         for agent in self.possible_agents:
             vehicles.append((
                 agent,
@@ -989,30 +998,32 @@ class CACCNCarsEnv(ParallelEnv):
                 self.state[agent]["vel"],
                 self.state[agent]["acc"],
                 self.state[agent]["y"],
-                self.state[agent].get("vy", 0.0)
+                self.state[agent].get("vy", 0.0),
+                not self.state[agent]["merged"]
             ))
 
         car_w = max(84, int(11.5 * scale))
         car_h = max(42, int(car_w * 0.50))
 
-        for name, pos, vel, acc, y_val, vy_val in vehicles:
+        for name, pos, vel, acc, y_val, vy_val, is_merging in vehicles:
             screen_x = int((pos - camera_left_world) * scale)
             center_y = road_y + int((y_val + 0.5) * lane_height)
 
             self._blit_hd_car(self.screen, screen_x, center_y, car_w, car_h, name, acc, vy_val)
 
             vel_kmh = vel * 3.6
-            lbl_y = center_y - car_h // 2 - 14 if y_val < 0.5 else center_y + car_h // 2 + 4
-            role_tag = " (Besoroló)" if name == self.merging_agent else ""
+            lbl_y = center_y - car_h // 2 - 16 if y_val < 0.5 else center_y + car_h // 2 + 4
+            role_tag = " (Besoroló)" if is_merging else ""
             name_lbl = self.small_font.render(f"{name}{role_tag}:{vel_kmh:.0f}km/h", True, (255, 255, 255))
             self.screen.blit(name_lbl, (screen_x - 42, lbl_y))
 
         merge_status = "SIKERES" if self.merge_completed else "FOLYAMATBAN"
+        lead_str = f"{self.lead_vel * 3.6:.0f} km/h" if self.has_lead else "Nincs (Szabad pálya)"
         info_text = (
             f"Út: {self.traveled_dist:.0f}/{self.track_length:.0f} m  |  "
             f"Idő: {self.current_step * self.dt:.1f} s  |  "
-            f"Besorolás ({self.merging_agent}): {merge_status}  |  "
-            f"Lead: {self.lead_vel * 3.6:.0f} km/h"
+            f"Besorolás: {merge_status}  |  "
+            f"Lead: {lead_str}"
         )
         header = self.font.render(info_text, True, (240, 240, 240))
         self.screen.blit(header, (20, 20))
